@@ -1,0 +1,10 @@
+streamlit
+markitdown[pdf]
+groq
+chromadb
+pandas
+scikit-learn
+xgboost
+imbalanced-learn
+python-dotenv
+openpyxl
