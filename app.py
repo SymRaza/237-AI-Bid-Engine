@@ -10,6 +10,7 @@ from sklearn.model_selection import train_test_split
 from groq import Groq
 from dotenv import load_dotenv
 import json
+from sklearn.metrics import roc_auc_score
 
 # Load API keys
 load_dotenv()
@@ -18,6 +19,8 @@ groq_client = Groq(api_key=os.getenv("GROQ_API_KEY", "mock_key"))
 st.set_page_config(page_title="AI Bid Response Engine", layout="wide")
 WORKSPACE_DIR = "drive_workspaces"
 os.makedirs(WORKSPACE_DIR, exist_ok=True)
+
+# --- PRELOADING LOCAL CSV DATA ON STARTUP ---
 
 # --- DYNAMIC VECTOR DB (Populated from your Excel Sheet) ---
 @st.cache_resource
@@ -34,10 +37,12 @@ def init_vector_db_from_excel(_capability_df):
     collection = chroma_client.create_collection(name="capabilities")
     
     if _capability_df is not None and not _capability_df.empty:
+        # Combine row columns into a singular text string for semantic search matching
         text_documents = []
         doc_ids = []
         
         for idx, row in _capability_df.iterrows():
+            # Merges all row context into a block of text the LLM can easily read
             combined_text = " | ".join([f"{col}: {val}" for col, val in row.items() if pd.notna(val)])
             text_documents.append(combined_text)
             ids_string = f"cap_row_{idx}"
@@ -63,15 +68,17 @@ def train_model_from_excel(_bid_history_df):
     df[target] = df[target].fillna(0).astype(int)
     y = df[target]
 
-    # CLEAN THE MESSY BUDGET STRING 
+    # --- CRITICAL BUG FIX: CLEAN THE MESSY BUDGET STRING ---
     if 'Budget' in df.columns:
+        # Extracts just the numbers from strings like "PKR 424M" -> 424
         df['Budget'] = df['Budget'].astype(str).str.replace(r'[^\d.]', '', regex=True)
         df['Budget'] = pd.to_numeric(df['Budget'], errors='coerce')
     
     # Explicitly specify clean, non-leaked features
     categorical_cols = ["Client", "Sector", "Bid Manager"]
-    numeric_cols = ["Budget", "Score (%)", "Response Time (hrs)", "Compliance %", "Doc Pages", "Gaps Found"]
+    numeric_cols = ["Budget", "Score (%)", "Response Time (hrs)", "Compliance %", "Gaps Found"]
     
+    # Maintain tracking dictionaries to map drop-down options back to cat codes
     categorical_mappings = {}
     X = pd.DataFrame()
     
@@ -85,30 +92,29 @@ def train_model_from_excel(_bid_history_df):
     for col in categorical_cols:
         if col in df.columns:
             df[col] = df[col].astype(str).str.strip()
+            # Store unique options sorted alphabetically for UI consistency
             unique_options = sorted(list(df[col].unique()))
             categorical_mappings[col] = unique_options
+            
+            # Map values explicitly to their text list indices
             X[col] = df[col].map(lambda x: unique_options.index(x) if x in unique_options else 0)
 
-    # Balance classes using SMOTE safely before split
-    try:
-        smote = SMOTE(random_state=42)
-        X_res, y_res = smote.fit_resample(X, y)
-    except Exception:
-        X_res, y_res = X, y
-
     # Split and Train
-    X_train, X_test, y_train, y_test = train_test_split(X_res, y_res, test_size=0.2, random_state=42)
+    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
     
     model = XGBClassifier(use_label_encoder=False, eval_metric='logloss')
     model.fit(X_train, y_train)
     
+    preds = model.predict_proba(X_test)[:, 1]
+    auc_score = roc_auc_score(y_test, preds)
+
     # Attach tracking variables to model metadata object
     model.feature_names_inside_ = list(X.columns)
     model.categorical_mappings_ = categorical_mappings
     model.categorical_cols_ = categorical_cols
     model.feature_bounds_ = {col: (float(X[col].min()), float(X[col].max())) for col in X.columns}
     
-    return model
+    return model, auc_score
 
 # --- CORE LLM FUNCTIONS ---
 def parse_document(file_path):
@@ -142,7 +148,7 @@ def draft_proposal(requirements, capabilities):
     return response.choices[0].message.content
 
 def extract_ml_features_from_rfp(rfp_text, categorical_mappings):
-    """Uses Groq to extract structured numerical and categorical values from the RFP text."""
+    """Uses Groq to extract structured numerical and categorical values from the RFP text without page numbers."""
     client_opts = ", ".join(categorical_mappings.get("Client", ["Generic"]))
     sector_opts = ", ".join(categorical_mappings.get("Sector", ["IT Services"]))
     manager_opts = ", ".join(categorical_mappings.get("Bid Manager", ["Sara Malik"]))
@@ -159,7 +165,6 @@ def extract_ml_features_from_rfp(rfp_text, categorical_mappings):
         "Score (%)": "Evaluate the clarity of this RFP text. If the text is highly structured and clean, assign a score between 82-95. If vague or chaotic, assign a score between 45-68. Return integer only.",
         "Response Time (hrs)": "Look at the deadline urgency. If short turnaround, estimate 40-70 hours. If massive scope, estimate 100-160 hours. Return integer only.",
         "Compliance %": "Estimate baseline requirements. If standard project, return 90-100. If highly complex regulatory demands, return 70-85. Return integer only.",
-        "Doc Pages": "Estimate total page length of this project based on text volume. Short task order=20-40, medium project=50-90, massive blueprint=120-250. Return integer only.",
         "Gaps Found": "Count the number of vague requirements or missing details in this text segment. Return an integer between 0 and 8.",
         "Bid Manager": "Assign the best fit manager from: [{manager_opts}]."
     }}
@@ -172,14 +177,14 @@ def extract_ml_features_from_rfp(rfp_text, categorical_mappings):
         response = groq_client.chat.completions.create(
             messages=[{"role": "user", "content": prompt}],
             model="llama-3.1-8b-instant",
-            temperature=0.0,
+            temperature=0.0, 
         )
         data = json.loads(response.choices[0].message.content.strip())
         return data
     except Exception as e:
         return {
             "Client": "Generic", "Sector": "Finance", "Budget": 150, "Score (%)": 85,
-            "Response Time (hrs)": 80, "Compliance %": 95, "Doc Pages": 60, "Gaps Found": 1,
+            "Response Time (hrs)": 80, "Compliance %": 95, "Gaps Found": 1,
             "Bid Manager": "Sara Malik"
         }
 
@@ -188,6 +193,7 @@ def extract_ml_features_from_rfp(rfp_text, categorical_mappings):
 def load_local_csv_data():
     """Preloads the hackathon datasets directly from the project directory."""
     try:
+        # Looking for the files locally in the repository folder
         bid_history_df = pd.read_csv("bid_history.csv")
         capability_df = pd.read_csv("capability_library.csv")
         return bid_history_df, capability_df
@@ -198,28 +204,129 @@ def load_local_csv_data():
         st.error(f"Error loading local data: {e}")
         return None, None
 
+# @st.cache_resource
+# def train_model_preloaded(df):
+#     """Trains an XGBoost model by explicitly targeting the core win/loss outcome field."""
+#     if df is None or df.empty:
+#         return None
+        
+#     df = df.copy()
+    
+#     # 1. Clean up column whitespace and casing
+#     df.columns = df.columns.str.strip()
+    
+#     # --- FIXED: SPECIFIC EXPLICIT TARGETING ---
+#     # We look for common win/loss target labels. Change 'Outcome' to your exact column name if different.
+#     potential_targets = ['Outcome', 'Win/Loss', 'Status', 'Win', 'Result']
+#     target = None
+    
+#     for t in potential_targets:
+#         match = [col for col in df.columns if t.lower() in col.lower()]
+#         if match:
+#             target = match[0]
+#             break
+            
+#     # If no keywords match, explicitly look for a column that contains binary data, or default safely
+#     if not target:
+#         target = df.columns[-1] # Fallback to last column if all else fails
+        
+#     # Remove any stray rows where the data row itself accidently duplicates the header name string
+#     df = df[df[target] != 'Submission Date']
+#     df = df[df[target] != target]
+    
+#     # Safely convert textual outcomes ('Win', 'Loss') to clean binary numbers
+#     df[target] = df[target].astype(str).str.strip().str.lower()
+#     df[target] = df[target].map({
+#         'win': 1, 'loss': 0, 'won': 1, 'lost': 0, 
+#         '1': 1, '0': 0, '1.0': 1, '0.0': 0, 
+#         'pass': 1, 'fail': 0
+#     })
+    
+#     # Handle any empty cells by filling them as 0 (Loss)
+#     df[target] = df[target].fillna(0).astype(int)
+#     # ------------------------------------------
+
+#     # Define the exact features required by the win-probability heuristics
+#     # Lowercasing search to guarantee column match regardless of CSV casing
+#     df.columns = df.columns.str.lower()
+#     target_lower = target.lower()
+    
+#     feature_cols = ['budget_alignment', 'competitor_presence', 'past_domain_win_rate']
+#     actual_features = []
+    
+#     for feat in feature_cols:
+#         match = [col for col in df.columns if feat[:5] in col and col != target_lower]
+#         if match:
+#             actual_features.append(match[0])
+            
+#     if not actual_features:
+#         # Fallback: select the first 3 numeric columns that aren't our target
+#         actual_features = [col for col in df.select_dtypes(include=['number']).columns if col != target_lower][:3]
+        
+#     if not actual_features:
+#         st.error("XGBoost error: System could not identify clean numeric feature columns in 'bid_history.csv' to train on.")
+#         return None
+        
+#     X = df[actual_features].fillna(0)
+#     y = df[target_lower]
+    
+#     # Balance classes using SMOTE
+#     try:
+#         smote = SMOTE(random_state=42)
+#         X_res, y_res = smote.fit_resample(X, y)
+#     except Exception:
+#         X_res, y_res = X, y
+        
+#     X_train, X_test, y_train, y_test = train_test_split(X_res, y_res, test_size=0.2, random_state=42)
+    
+#     model = XGBClassifier(use_label_encoder=False, eval_metric='logloss')
+#     model.fit(X_train, y_train)
+    
+#     model.feature_names_inside_ = actual_features
+#     model.feature_bounds_ = {}
+#     for col in X.columns:
+#         min_v = float(X[col].min())
+#         max_v = float(X[col].max())
+#         if min_v == max_v:
+#             min_v, max_v = (0.0, 1.0) if min_v <= 1.0 else (0.0, 100.0)
+#         model.feature_bounds_[col] = (min_v, max_v)
+        
+#     return model
+
 # --- AUTOMATIC SYSTEM INITIALIZATION ---
+# This runs instantly when the page loads up—no upload blocks required!
 bid_history_df, capability_df = load_local_csv_data()
 
 vector_db = None
 win_model = None
+model_auc = 0.0
 
 if capability_df is not None:
+    # This runs your RAG vector DB initialization
     vector_db = init_vector_db_from_excel(capability_df)
     
 if bid_history_df is not None:
-    win_model = train_model_from_excel(bid_history_df)
+    # FIX: Point this line directly to your updated explicit training function!
+    win_model, model_auc = train_model_from_excel(bid_history_df)
 
 # --- SIDEBAR DISPLAY ---
 st.sidebar.markdown("---")
 st.sidebar.subheader("System Status")
 if vector_db is not None:
-    st.sidebar.success("✅ RAG Knowledge Base Loaded!")
+    st.sidebar.success("RAG Knowledge Base Loaded!")
 if win_model is not None:
-    st.sidebar.success("✅ XGBoost Model Trained!")
+    st.sidebar.success("XGBoost Model Trained!")
+    st.sidebar.metric(label="Model ROC-AUC Score", value=f"{model_auc:.3f}")
 
 # --- MAIN WORKFLOW ---
-col1, col2 = st.columns([2, 1])
+
+# --- INITIALIZE INGESTION STATE HANDLERS ---
+if "extracted_inputs" not in st.session_state:
+    st.session_state.extracted_inputs = None
+if "auto_prob" not in st.session_state:
+    st.session_state.auto_prob = None
+
+col1, col2 = st.columns([5, 4])
 
 with col1:
     st.subheader("1. Document Ingestion")
@@ -257,16 +364,36 @@ with col1:
                     st.text_area("Review and Edit:", value=draft, height=300)
 
         # --- AUTOMATED ML PREDICTION LAYER ---
-        if win_model is not None:
+        if win_model is not None and st.session_state.extracted_inputs is None:
             with st.spinner("🔮 Analyzing document features and predicting win probability..."):
                 extracted_inputs = extract_ml_features_from_rfp(markdown_text, win_model.categorical_mappings_)
                 
+                # Create a normalized lowercase map of what the LLM returned to make lookups immune to casing shifts
+                llm_lookup = {k.lower().strip(): v for k, v in extracted_inputs.items()}
+                
                 processed_inputs = {}
                 for feat in win_model.feature_names_inside_:
-                    val = extracted_inputs.get(feat, 0)
+                    # Strip parentheses symbols to clean up mappings (e.g., matching "score" to "Score (%)")
+                    clean_feat_key = feat.lower().split('(')[0].strip()
+                    
+                    val = None
+                    for key in llm_lookup:
+                        if clean_feat_key in key or key in clean_feat_key:
+                            val = llm_lookup[key]
+                            break
+                    
+                    if val is None:
+                        val = 0
+                    
                     if feat in win_model.categorical_cols_:
                         options = win_model.categorical_mappings_.get(feat, [])
-                        processed_inputs[feat] = options.index(val) if val in options else 0
+                        val_str = str(val).strip().lower()
+                        match_idx = 0
+                        for i, opt in enumerate(options):
+                            if str(opt).lower() in val_str or val_str in str(opt).lower():
+                                match_idx = i
+                                break
+                        processed_inputs[feat] = match_idx
                     else:
                         try:
                             processed_inputs[feat] = float(val)
@@ -277,9 +404,9 @@ with col1:
                 input_df = pd.DataFrame([processed_inputs])
                 input_df = input_df[win_model.feature_names_inside_]
                 
-                # --- ADVANCED CALIBRATION LAYER FOR VARIANCE ---
                 raw_prob = win_model.predict_proba(input_df)[0][1]
 
+                # Advanced Calibration Calculation
                 if raw_prob > 0.5:
                     gap_penalty = float(extracted_inputs.get("Gaps Found", 1)) * 0.015
                     comp_val = float(extracted_inputs.get("Compliance %", 95))
@@ -296,57 +423,40 @@ with col1:
                     gap_bonus = (5 - float(extracted_inputs.get("Gaps Found", 4))) * 0.01
                     auto_prob = min(0.49, raw_prob + gap_bonus)
                 
-                st.markdown("---")
-                st.subheader("🔮 Instant AI Evaluation Verdict")
-                
-                v_col1, v_col2 = st.columns(2)
-                with v_col1:
-                    st.metric(label="AI Predicted Win Probability", value=f"{auto_prob*100:.1f}%")
-                with v_col2:
-                    if auto_prob > 0.6:
-                        st.success("Recommended Decision: GO (Strong Match)")
-                    elif auto_prob > 0.4:
-                        st.warning("Recommended Decision: REVIEW (Borderline)")
-                    else:
-                        st.error("Recommended Decision: NO-GO (High Risk)")
-                        
-                with st.expander("View AI Extracted Feature Values"):
-                    st.json(extracted_inputs)
+                st.session_state.extracted_inputs = extracted_inputs
+                st.session_state.auto_prob = auto_prob
+                st.rerun()
 
 with col2:
     st.subheader("2. GO/NO-GO Dashboard")
     
-    if win_model is not None and hasattr(win_model, 'feature_names_inside_'):
-        st.write("Score this bid opportunity based on historical patterns.")
+    if st.session_state.extracted_inputs is not None:
+        st.write("Score card generated dynamically from document analysis patterns.")
         
-        user_inputs = {}
-        for feature in win_model.feature_names_inside_:
-            if feature in win_model.categorical_cols_:
-                options_list = win_model.categorical_mappings_.get(feature, ["Default"])
-                selected_text = st.selectbox(f"{feature}", options_list)
-                user_inputs[feature] = options_list.index(selected_text)
+        st.markdown("### 🔮 Instant AI Evaluation Verdict")
+        auto_prob = st.session_state.auto_prob
+        
+        v_col1, v_col2 = st.columns(2)
+        with v_col1:
+            st.metric(label="AI Predicted Win Probability", value=f"{auto_prob*100:.1f}%")
+        with v_col2:
+            if auto_prob > 0.6:
+                st.success("Decision: GO (Strong Match)")
+            elif auto_prob > 0.4:
+                st.warning("Decision: REVIEW (Borderline)")
             else:
-                min_val, max_val = win_model.feature_bounds_.get(feature, (0.0, 100.0))
+                st.error("Decision: NO-GO (High Risk)")
                 
-                if "budget" in feature.lower():
-                    user_inputs[feature] = st.slider("Budget (Millions PKR)", int(min_val), int(max_val), int(min_val + max_val)//2)
-                elif "compliance" in feature.lower() or "score" in feature.lower():
-                    user_inputs[feature] = st.slider(f"{feature}", int(min_val), int(max_val), int(max_val))
-                else:
-                    user_inputs[feature] = st.slider(f"{feature}", int(min_val), int(max_val), int(min_val + max_val)//2)
-                    
-        if st.button("Calculate Win Probability"):
-            input_df = pd.DataFrame([user_inputs])
-            input_df = input_df[win_model.feature_names_inside_]
+        st.markdown("---")
+        st.markdown("### 📋 AI Structured Feature Matrix")
+        st.json(st.session_state.extracted_inputs)
+        
+        # Add a clear action step button if they want to load a fresh RFP
+        if st.button("Clear Dashboard & Evaluate New Document"):
+            st.session_state.extracted_inputs = None
+            st.session_state.auto_prob = None
+            st.rerun()
             
-            prob = win_model.predict_proba(input_df)[0][1]
-            st.metric(label="Probability of Winning", value=f"{prob*100:.1f}%")
-            
-            if prob > 0.6:
-                st.success("Decision: GO")
-            elif prob > 0.4:
-                st.warning("Decision: REVIEW")
-            else:
-                st.error("Decision: NO-GO")
     else:
-        st.warning("⚠️ Local datasets not found. Please ensure CSV files are in the project folder.")
+        # Default placeholder container on blank initial load
+        st.info("ℹ️ Analytics engine idle. Upload an RFP or Tender document in the left column to run the automated diagnostic scoring matrix.")
