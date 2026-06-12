@@ -1,6 +1,4 @@
-﻿PS1 – Bid History Dataset,,,,,,,,,,,
-Historical bid outcomes for win-probability modelling | 120 records,,,,,,,,,,,
-Bid ID,Client,Sector,Budget,Score (%),Outcome,Response Time (hrs),Compliance %,Doc Pages,Gaps Found,Bid Manager,Submission Date
+﻿Bid ID,Client,Sector,Budget,Score (%),Outcome,Response Time (hrs),Compliance %,Doc Pages,Gaps Found,Bid Manager,Submission Date
 BID-0001,FWO,Construction,PKR 22M,92,Win,94,75,144,2,Sara Malik,2025-02-22
 BID-0002,NLC,Construction,PKR 312M,72,Win,32,61,77,3,Usman Raza,2025-04-30
 BID-0003,PIMS,IT Services,PKR 297M,57,Loss,163,86,142,7,Nadia Ahmed,2025-10-29
