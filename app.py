@@ -204,94 +204,6 @@ def load_local_csv_data():
         st.error(f"Error loading local data: {e}")
         return None, None
 
-# @st.cache_resource
-# def train_model_preloaded(df):
-#     """Trains an XGBoost model by explicitly targeting the core win/loss outcome field."""
-#     if df is None or df.empty:
-#         return None
-        
-#     df = df.copy()
-    
-#     # 1. Clean up column whitespace and casing
-#     df.columns = df.columns.str.strip()
-    
-#     # --- FIXED: SPECIFIC EXPLICIT TARGETING ---
-#     # We look for common win/loss target labels. Change 'Outcome' to your exact column name if different.
-#     potential_targets = ['Outcome', 'Win/Loss', 'Status', 'Win', 'Result']
-#     target = None
-    
-#     for t in potential_targets:
-#         match = [col for col in df.columns if t.lower() in col.lower()]
-#         if match:
-#             target = match[0]
-#             break
-            
-#     # If no keywords match, explicitly look for a column that contains binary data, or default safely
-#     if not target:
-#         target = df.columns[-1] # Fallback to last column if all else fails
-        
-#     # Remove any stray rows where the data row itself accidently duplicates the header name string
-#     df = df[df[target] != 'Submission Date']
-#     df = df[df[target] != target]
-    
-#     # Safely convert textual outcomes ('Win', 'Loss') to clean binary numbers
-#     df[target] = df[target].astype(str).str.strip().str.lower()
-#     df[target] = df[target].map({
-#         'win': 1, 'loss': 0, 'won': 1, 'lost': 0, 
-#         '1': 1, '0': 0, '1.0': 1, '0.0': 0, 
-#         'pass': 1, 'fail': 0
-#     })
-    
-#     # Handle any empty cells by filling them as 0 (Loss)
-#     df[target] = df[target].fillna(0).astype(int)
-#     # ------------------------------------------
-
-#     # Define the exact features required by the win-probability heuristics
-#     # Lowercasing search to guarantee column match regardless of CSV casing
-#     df.columns = df.columns.str.lower()
-#     target_lower = target.lower()
-    
-#     feature_cols = ['budget_alignment', 'competitor_presence', 'past_domain_win_rate']
-#     actual_features = []
-    
-#     for feat in feature_cols:
-#         match = [col for col in df.columns if feat[:5] in col and col != target_lower]
-#         if match:
-#             actual_features.append(match[0])
-            
-#     if not actual_features:
-#         # Fallback: select the first 3 numeric columns that aren't our target
-#         actual_features = [col for col in df.select_dtypes(include=['number']).columns if col != target_lower][:3]
-        
-#     if not actual_features:
-#         st.error("XGBoost error: System could not identify clean numeric feature columns in 'bid_history.csv' to train on.")
-#         return None
-        
-#     X = df[actual_features].fillna(0)
-#     y = df[target_lower]
-    
-#     # Balance classes using SMOTE
-#     try:
-#         smote = SMOTE(random_state=42)
-#         X_res, y_res = smote.fit_resample(X, y)
-#     except Exception:
-#         X_res, y_res = X, y
-        
-#     X_train, X_test, y_train, y_test = train_test_split(X_res, y_res, test_size=0.2, random_state=42)
-    
-#     model = XGBClassifier(use_label_encoder=False, eval_metric='logloss')
-#     model.fit(X_train, y_train)
-    
-#     model.feature_names_inside_ = actual_features
-#     model.feature_bounds_ = {}
-#     for col in X.columns:
-#         min_v = float(X[col].min())
-#         max_v = float(X[col].max())
-#         if min_v == max_v:
-#             min_v, max_v = (0.0, 1.0) if min_v <= 1.0 else (0.0, 100.0)
-#         model.feature_bounds_[col] = (min_v, max_v)
-        
-#     return model
 
 # --- AUTOMATIC SYSTEM INITIALIZATION ---
 # This runs instantly when the page loads up—no upload blocks required!
@@ -365,7 +277,7 @@ with col1:
 
         # --- AUTOMATED ML PREDICTION LAYER ---
         if win_model is not None and st.session_state.extracted_inputs is None:
-            with st.spinner("🔮 Analyzing document features and predicting win probability..."):
+            with st.spinner("Analyzing document features and predicting win probability..."):
                 extracted_inputs = extract_ml_features_from_rfp(markdown_text, win_model.categorical_mappings_)
                 
                 # Create a normalized lowercase map of what the LLM returned to make lookups immune to casing shifts
@@ -433,7 +345,7 @@ with col2:
     if st.session_state.extracted_inputs is not None:
         st.write("Score card generated dynamically from document analysis patterns.")
         
-        st.markdown("### 🔮 Instant AI Evaluation Verdict")
+        st.markdown("### Instant AI Evaluation Verdict")
         auto_prob = st.session_state.auto_prob
         
         v_col1, v_col2 = st.columns(2)
@@ -459,4 +371,4 @@ with col2:
             
     else:
         # Default placeholder container on blank initial load
-        st.info("ℹ️ Analytics engine idle. Upload an RFP or Tender document in the left column to run the automated diagnostic scoring matrix.")
+        st.info("Analytics engine idle. Upload an RFP or Tender document in the left column to run the automated diagnostic scoring matrix.")
